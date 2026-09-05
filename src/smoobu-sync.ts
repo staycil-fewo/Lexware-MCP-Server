@@ -26,6 +26,8 @@ interface ThreadPage {
   threads?: Array<Record<string, unknown>>;
 }
 
+const BOOKING_HISTORY_FROM = "2000-01-01";
+
 export function loadSmoobuConfig(): SmoobuConfig | null {
   const apiKey = process.env.SMOOBU_API_KEY?.trim();
   const apiSecret = process.env.SMOOBU_API_SECRET?.trim() || undefined;
@@ -106,6 +108,7 @@ async function allBookings(cfg: SmoobuConfig): Promise<Array<Record<string, unkn
   const rows: Array<Record<string, unknown>> = [];
   for (let page = 1; page <= 500; page++) {
     const res = await smoobuGet<BookingPage>(cfg, "/api/reservations", {
+      from: BOOKING_HISTORY_FROM,
       page,
       pageSize: 100,
       showCancellation: true,
@@ -211,7 +214,7 @@ export async function runSmoobuSync(): Promise<void> {
 
     await upsertJson(cfg, "smoobu/account.json", { syncedAt, data: me });
     await upsertJson(cfg, "smoobu/apartments.json", { syncedAt, count: apartments.length, data: apartments });
-    await upsertJson(cfg, "smoobu/bookings.json", { syncedAt, count: bookings.length, data: bookings });
+    await upsertJson(cfg, "smoobu/bookings.json", { syncedAt, count: bookings.length, from: BOOKING_HISTORY_FROM, data: bookings });
     await upsertJson(cfg, "smoobu/threads.json", {
       syncedAt,
       count: threadData.threads.length,
@@ -220,7 +223,7 @@ export async function runSmoobuSync(): Promise<void> {
     });
     await upsertJson(cfg, "reports/smoobu-performance.json", {
       syncedAt,
-      basis: "Smoobu reservation price grouped by arrival month. Cancellations and blocked bookings excluded from performance totals. This is booking revenue, not bank cash received.",
+      basis: `Smoobu reservation price grouped by arrival month. Source reservations are loaded from ${BOOKING_HISTORY_FROM} onward. Cancellations and blocked bookings excluded from performance totals. This is booking revenue, not bank cash received.`,
       ...reports,
     });
     await upsertJson(cfg, "reports/smoobu-sync-status.json", {
@@ -228,12 +231,13 @@ export async function runSmoobuSync(): Promise<void> {
       ok: true,
       authMode: cfg.apiSecret ? "hmac" : "legacy",
       fullBookingPayloads: true,
+      bookingHistoryFrom: BOOKING_HISTORY_FROM,
       apartmentCount: apartments.length,
       bookingCount: bookings.length,
       threadCount: threadData.threads.length,
       unreadMessages: threadData.unreadMessages,
     });
-    console.error(`[smoobu-sync] OK — ${apartments.length} apartments, ${bookings.length} full bookings, ${threadData.threads.length} message threads (${cfg.apiSecret ? "HMAC" : "legacy auth"})`);
+    console.error(`[smoobu-sync] OK — ${apartments.length} apartments, ${bookings.length} full bookings from ${BOOKING_HISTORY_FROM}, ${threadData.threads.length} message threads (${cfg.apiSecret ? "HMAC" : "legacy auth"})`);
   } catch (err) {
     console.error(`[smoobu-sync] FAILED: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
