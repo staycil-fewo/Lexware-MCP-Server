@@ -68,6 +68,7 @@ async function allBookings(cfg: SmoobuConfig): Promise<Array<Record<string, unkn
   const rows: Array<Record<string, unknown>> = [];
   for (let page = 1; page <= 500; page++) {
     const res = await smoobuGet<BookingPage>(cfg, "/api/reservations", {
+      from: "2025-01-01",
       page,
       pageSize: 100,
       showCancellation: true,
@@ -185,17 +186,18 @@ export async function runSmoobuSync(): Promise<void> {
     await upsertJson(cfg, "smoobu/bookings.json", { syncedAt, count: bookings.length, data: bookings });
     await upsertJson(cfg, "reports/smoobu-performance.json", {
       syncedAt,
-      basis: "Smoobu reservation price grouped by arrival month. Cancellations and blocked bookings excluded. This is booking revenue, not bank cash received.",
+      basis: "Smoobu reservation price grouped by arrival month. Source reservations start at 2025-01-01. Cancellations and blocked bookings excluded from performance totals. This is booking revenue, not bank cash received.",
       ...reports,
     });
     await upsertJson(cfg, "reports/smoobu-sync-status.json", {
       syncedAt,
       ok: true,
       authMode: cfg.apiSecret ? "hmac" : "legacy",
+      from: "2025-01-01",
       apartmentCount: apartments.length,
       bookingCount: bookings.length,
     });
-    console.error(`[smoobu-sync] OK — ${apartments.length} apartments, ${bookings.length} bookings (${cfg.apiSecret ? "HMAC" : "legacy auth"})`);
+    console.error(`[smoobu-sync] OK — ${apartments.length} apartments, ${bookings.length} bookings since 2025-01-01 (${cfg.apiSecret ? "HMAC" : "legacy auth"})`);
   } catch (err) {
     console.error(`[smoobu-sync] FAILED: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
