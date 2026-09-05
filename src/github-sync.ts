@@ -119,9 +119,17 @@ export async function runGithubFinanceSync(client: LexwareClient): Promise<void>
     await upsertJson(cfg, "lexware/vouchers.json", { syncedAt, count: vouchers.length, data: vouchers });
     await upsertJson(cfg, "lexware/invoices.json", { syncedAt, count: invoices.length, data: invoices });
     await upsertJson(cfg, "lexware/contacts.json", { syncedAt, count: contacts.length, data: contacts });
-    await upsertJson(cfg, "reports/monthly-summary.json", { syncedAt, months: monthlySummary(vouchers) });
-    await upsertJson(cfg, "reports/sync-status.json", { syncedAt, ok: true, voucherCount: vouchers.length, contactCount: contacts.length });
-    console.error(`[lexware-mcp] GitHub finance sync OK — ${vouchers.length} vouchers, ${contacts.length} contacts`);
+    await upsertJson(cfg, "reports/monthly-summary.json", {
+      syncedAt,
+      basis: {
+        invoiceMonths: "invoice and salesinvoice only; grouped by voucherDate; totalAmount is gross invoiced revenue",
+        allVoucherMonths: "all voucher types; not a revenue measure",
+      },
+      invoiceMonths: monthlySummary(invoices),
+      allVoucherMonths: monthlySummary(vouchers),
+    });
+    await upsertJson(cfg, "reports/sync-status.json", { syncedAt, ok: true, voucherCount: vouchers.length, invoiceCount: invoices.length, contactCount: contacts.length });
+    console.error(`[lexware-mcp] GitHub finance sync OK — ${vouchers.length} vouchers, ${invoices.length} invoices, ${contacts.length} contacts`);
   } catch (err) {
     console.error(`[lexware-mcp] GitHub finance sync FAILED: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
