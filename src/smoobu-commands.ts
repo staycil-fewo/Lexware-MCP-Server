@@ -1,6 +1,11 @@
 import { loadSmoobuConfig, smoobuGet, smoobuPost, type SmoobuConfig } from "./smoobu-sync.js";
 
-type SmoobuCommandAction = "send_guest_message" | "get_guest_messages" | "send_host_message";
+type SmoobuCommandAction =
+  | "find_bookings"
+  | "get_booking"
+  | "send_guest_message"
+  | "get_guest_messages"
+  | "send_host_message";
 
 interface SmoobuCommand {
   id?: string;
@@ -13,6 +18,15 @@ interface SmoobuCommand {
   createdAt?: string;
   status?: string;
   attemptStartedAt?: string;
+  from?: string;
+  to?: string;
+  apartmentId?: number | string;
+  apartmentName?: string;
+  guestName?: string;
+  channelName?: string;
+  showCancellation?: boolean;
+  excludeBlocked?: boolean;
+  limit?: number;
 }
 
 interface GithubItem {
@@ -30,9 +44,18 @@ interface MessagePage {
   messages?: Array<Record<string, unknown>>;
 }
 
+interface BookingPage {
+  page_count?: number;
+  page_size?: number;
+  total_items?: number;
+  page?: number;
+  bookings?: Array<Record<string, unknown>>;
+}
+
 const PENDING_DIR = "commands/smoobu/pending";
 const RESULTS_DIR = "commands/smoobu/results";
 const POLL_MS = 30_000;
+const ALL_HISTORY_FROM = "2000-01-01";
 
 function githubHeaders(cfg: SmoobuConfig) {
   return {
@@ -118,6 +141,59 @@ async function allGuestMessages(cfg: SmoobuConfig, reservationId: number): Promi
   return rows;
 }
 
+async function findBookings(cfg: SmoobuConfig, command: SmoobuCommand) {
+  const rows: Array<Record<string, unknown>> = [];
+  const apartmentId = command.apartmentId === undefined ? undefined : Number(command.apartmentId);
+  if (apartmentId !== undefined && (!Number.isInteger(apartmentId) || apartmentId <= 0)) {
+    throw new Error("apartmentId must be a positive integer");
+  }
+
+  for (let page = 1; page <= 500; page++) {
+    const response = await smoobuGet<BookingPage>(cfg, "/api/reservations", {
+      from: command.from || ALL_HISTORY_FROM,
+      to: command.to,
+      apartmentId,
+      page,
+      pageSize: 100,
+      showCancellation: command.showCancellation ?? true,
+      excludeBlocked: command.excludeBlocked ?? false,
+      includePriceElements: true,
+    });
+    rows.push(...(response.bookings ?? []));
+    if (page >= (response.page_count ?? 1)) break;
+  }
+
+  const norm = (value: unknown) => String(value ?? "").trim().toLocaleLowerCase("de-DE");
+  const apartmentNeedle = norm(command.apartmentName);
+  const guestNeedle = norm(command.guestName);
+  const channelNeedle = norm(command.channelName);
+
+  const matched = rows.filter((row) => {
+    const apartment = row.apartment && typeof row.apartment === "object" ? row.apartment as Record<string, unknown> : {};
+    const channel = row.channel && typeof row.channel === "object" ? row.channel as Record<string, unknown> : {};
+    if (apartmentNeedle && !norm(apartment.name).includes(apartmentNeedle)) return false;
+    if (guestNeedle && !norm(row["guest-name"]).includes(guestNeedle)) return false;
+    if (channelNeedle && !norm(channel.name).includes(channelNeedle)) return false;
+    return true;
+  });
+
+  const requestedLimit = Number(command.limit ?? 100);
+  const limit = Number.isFinite(requestedLimit) ? Math.min(500, Math.max(1, Math.floor(requestedLimit))) : 100;
+  return {
+    query: {
+      from: command.from || ALL_HISTORY_FROM,
+      to: command.to,
+      apartmentId,
+      apartmentName: command.apartmentName,
+      guestName: command.guestName,
+      channelName: command.channelName,
+    },
+    matchedTotal: matched.length,
+    returned: Math.min(matched.length, limit),
+    bookings: matched.slice(0, limit),
+  };
+}
+
 function reservationIdOf(command: SmoobuCommand): number {
   const id = Number(command.reservationId);
   if (!Number.isInteger(id) || id <= 0) throw new Error("reservationId must be a positive integer");
@@ -125,15 +201,28 @@ function reservationIdOf(command: SmoobuCommand): number {
 }
 
 async function executeCommand(cfg: SmoobuConfig, command: SmoobuCommand): Promise<unknown> {
-  const reservationId = reservationIdOf(command);
   switch (command.action) {
-    case "get_guest_messages":
+    case "find_bookings":
+      return findBookings(cfg, command);
+
+    case "get_booking": {
+      const reservationId = reservationIdOf(command);
+      return {
+        reservationId,
+        booking: await smoobuGet<Record<string, unknown>>(cfg, `/api/reservations/${reservationId}`),
+      };
+    }
+
+    case "get_guest_messages": {
+      const reservationId = reservationIdOf(command);
       return {
         reservationId,
         messages: await allGuestMessages(cfg, reservationId),
       };
+    }
 
     case "send_guest_message": {
+      const reservationId = reservationIdOf(command);
       if (command.confirmed !== true) throw new Error("Write command rejected: confirmed=true is required");
       const messageBody = String(command.messageBody ?? "").trim();
       if (!messageBody) throw new Error("messageBody is required");
@@ -147,6 +236,7 @@ async function executeCommand(cfg: SmoobuConfig, command: SmoobuCommand): Promis
     }
 
     case "send_host_message": {
+      const reservationId = reservationIdOf(command);
       if (command.confirmed !== true) throw new Error("Write command rejected: confirmed=true is required");
       const messageBody = String(command.messageBody ?? "").trim();
       if (!messageBody) throw new Error("messageBody is required");
@@ -186,8 +276,6 @@ export async function processSmoobuCommands(): Promise<void> {
           continue;
         }
 
-        // A command left in "sending" state means the process may have died after Smoobu accepted it.
-        // Never auto-resend in that state; return the current conversation for manual verification instead.
         if (command.status === "sending") {
           const reservationId = reservationIdOf(command);
           const messages = await allGuestMessages(cfg, reservationId).catch(() => []);
