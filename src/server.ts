@@ -5,6 +5,7 @@ import { ConfigError, describeCapabilities, loadConfig } from "./config.js";
 import { startGithubFinanceSync } from "./github-sync.js";
 import { LexwareClient } from "./lexware/client.js";
 import { advertisedScopes, buildOAuthMetadata, createAccessTokenVerifier } from "./oauth.js";
+import { startSmoobuSync } from "./smoobu-sync.js";
 import { registerTools } from "./tools/index.js";
 import { deferBodyParsingFor, isMcpPath, isUploadPath } from "./server-body-parsing.js";
 import { registerUploadRoutes } from "./uploads/routes.js";
@@ -124,6 +125,7 @@ if (config.capabilities.drafts) {
 
 registerTools(server, client, config, uploadTickets);
 startGithubFinanceSync(client);
+startSmoobuSync();
 
 console.error(
   `[lexware-mcp] starting — ${describeCapabilities(config)} bodyLimit=${bodyParsingConfigured ? `${JSON_BODY_LIMIT} (/mcp, post-auth)` : "default(~100kb)"}`,
