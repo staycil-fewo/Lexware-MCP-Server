@@ -2,6 +2,7 @@ import express, { type Request, type Response } from "express";
 import { mcpAuthMetadataRouter, McpServer, requireBearerAuth } from "skybridge/server";
 import { bearerAuthMiddleware } from "./auth.js";
 import { ConfigError, describeCapabilities, loadConfig } from "./config.js";
+import { startGithubFinanceSync } from "./github-sync.js";
 import { LexwareClient } from "./lexware/client.js";
 import { advertisedScopes, buildOAuthMetadata, createAccessTokenVerifier } from "./oauth.js";
 import { registerTools } from "./tools/index.js";
@@ -122,6 +123,7 @@ if (config.capabilities.drafts) {
 }
 
 registerTools(server, client, config, uploadTickets);
+startGithubFinanceSync(client);
 
 console.error(
   `[lexware-mcp] starting — ${describeCapabilities(config)} bodyLimit=${bodyParsingConfigured ? `${JSON_BODY_LIMIT} (/mcp, post-auth)` : "default(~100kb)"}`,
