@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 
-interface SmoobuConfig {
+export interface SmoobuConfig {
   apiKey: string;
   apiSecret?: string;
   repo: string;
@@ -17,7 +17,16 @@ interface BookingPage {
   bookings?: Array<Record<string, unknown>>;
 }
 
-function loadConfig(): SmoobuConfig | null {
+interface ThreadPage {
+  page_number?: number;
+  page_size?: number;
+  page_count?: number;
+  total_threads?: number;
+  unread_messages?: number;
+  threads?: Array<Record<string, unknown>>;
+}
+
+export function loadSmoobuConfig(): SmoobuConfig | null {
   const apiKey = process.env.SMOOBU_API_KEY?.trim();
   const apiSecret = process.env.SMOOBU_API_SECRET?.trim() || undefined;
   const repo = process.env.GITHUB_SYNC_REPO?.trim();
@@ -37,16 +46,24 @@ function canonicalQuery(params: Record<string, string | number | boolean | undef
     .join("&");
 }
 
-async function smoobuGet<T>(cfg: SmoobuConfig, path: string, params: Record<string, string | number | boolean | undefined> = {}): Promise<T> {
+export async function smoobuRequest<T>(
+  cfg: SmoobuConfig,
+  method: "GET" | "POST" | "PUT" | "DELETE",
+  path: string,
+  params: Record<string, string | number | boolean | undefined> = {},
+  body?: unknown,
+): Promise<T> {
   const query = canonicalQuery(params);
   const url = `https://login.smoobu.com${path}${query ? `?${query}` : ""}`;
+  const rawBody = body === undefined ? "" : JSON.stringify(body);
   const headers: Record<string, string> = { Accept: "application/json" };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
 
   if (cfg.apiSecret) {
     const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
     const nonce = randomUUID();
-    const bodyHash = createHash("sha256").update("").digest("hex");
-    const canonical = ["GET", path, query, timestamp, nonce, bodyHash, cfg.apiKey].join("\n");
+    const bodyHash = createHash("sha256").update(rawBody).digest("hex");
+    const canonical = [method, path, query, timestamp, nonce, bodyHash, cfg.apiKey].join("\n");
     const signature = createHmac("sha256", cfg.apiSecret).update(canonical).digest("base64");
     headers["X-API-Key"] = cfg.apiKey;
     headers["X-Timestamp"] = timestamp;
@@ -56,11 +73,33 @@ async function smoobuGet<T>(cfg: SmoobuConfig, path: string, params: Record<stri
     headers["Api-Key"] = cfg.apiKey;
   }
 
-  const response = await fetch(url, { headers });
+  const response = await fetch(url, {
+    method,
+    headers,
+    ...(body !== undefined ? { body: rawBody } : {}),
+  });
+  const text = await response.text();
   if (!response.ok) {
-    throw new Error(`Smoobu ${response.status}: ${(await response.text()).slice(0, 500)}`);
+    throw new Error(`Smoobu ${response.status}: ${text.slice(0, 500)}`);
   }
-  return response.json() as Promise<T>;
+  if (!text) return undefined as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return text as T;
+  }
+}
+
+export function smoobuGet<T>(
+  cfg: SmoobuConfig,
+  path: string,
+  params: Record<string, string | number | boolean | undefined> = {},
+): Promise<T> {
+  return smoobuRequest<T>(cfg, "GET", path, params);
+}
+
+export function smoobuPost<T>(cfg: SmoobuConfig, path: string, body: unknown): Promise<T> {
+  return smoobuRequest<T>(cfg, "POST", path, {}, body);
 }
 
 async function allBookings(cfg: SmoobuConfig): Promise<Array<Record<string, unknown>>> {
@@ -77,6 +116,21 @@ async function allBookings(cfg: SmoobuConfig): Promise<Array<Record<string, unkn
     if (page >= (res.page_count ?? 1)) break;
   }
   return rows;
+}
+
+async function allThreads(cfg: SmoobuConfig): Promise<{ unreadMessages: number; threads: Array<Record<string, unknown>> }> {
+  const rows: Array<Record<string, unknown>> = [];
+  let unreadMessages = 0;
+  for (let page = 1; page <= 500; page++) {
+    const res = await smoobuGet<ThreadPage>(cfg, "/api/threads", {
+      page_number: page,
+      page_size: 100,
+    });
+    rows.push(...(res.threads ?? []));
+    unreadMessages = Math.max(unreadMessages, Number(res.unread_messages ?? 0));
+    if (page >= (res.page_count ?? 1)) break;
+  }
+  return { unreadMessages, threads: rows };
 }
 
 function nightsBetween(arrival: unknown, departure: unknown): number {
@@ -141,23 +195,29 @@ async function upsertJson(cfg: SmoobuConfig, path: string, value: unknown): Prom
 let running = false;
 
 export async function runSmoobuSync(): Promise<void> {
-  const cfg = loadConfig();
+  const cfg = loadSmoobuConfig();
   if (!cfg || running) return;
   running = true;
   try {
     const syncedAt = new Date().toISOString();
-    const [me, apartmentList, bookings] = await Promise.all([
+    const [me, apartmentList, bookings, threadData] = await Promise.all([
       smoobuGet<Record<string, unknown>>(cfg, "/api/me"),
       smoobuGet<{ apartments?: Array<Record<string, unknown>> }>(cfg, "/api/apartments"),
       allBookings(cfg),
+      allThreads(cfg),
     ]);
     const apartments = apartmentList.apartments ?? [];
     const reports = bookingReports(bookings);
 
-    // Store complete Smoobu payloads in the private finance repo, including guest/customer fields.
     await upsertJson(cfg, "smoobu/account.json", { syncedAt, data: me });
     await upsertJson(cfg, "smoobu/apartments.json", { syncedAt, count: apartments.length, data: apartments });
     await upsertJson(cfg, "smoobu/bookings.json", { syncedAt, count: bookings.length, data: bookings });
+    await upsertJson(cfg, "smoobu/threads.json", {
+      syncedAt,
+      count: threadData.threads.length,
+      unreadMessages: threadData.unreadMessages,
+      data: threadData.threads,
+    });
     await upsertJson(cfg, "reports/smoobu-performance.json", {
       syncedAt,
       basis: "Smoobu reservation price grouped by arrival month. Cancellations and blocked bookings excluded from performance totals. This is booking revenue, not bank cash received.",
@@ -170,8 +230,10 @@ export async function runSmoobuSync(): Promise<void> {
       fullBookingPayloads: true,
       apartmentCount: apartments.length,
       bookingCount: bookings.length,
+      threadCount: threadData.threads.length,
+      unreadMessages: threadData.unreadMessages,
     });
-    console.error(`[smoobu-sync] OK — ${apartments.length} apartments, ${bookings.length} full bookings (${cfg.apiSecret ? "HMAC" : "legacy auth"})`);
+    console.error(`[smoobu-sync] OK — ${apartments.length} apartments, ${bookings.length} full bookings, ${threadData.threads.length} message threads (${cfg.apiSecret ? "HMAC" : "legacy auth"})`);
   } catch (err) {
     console.error(`[smoobu-sync] FAILED: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
@@ -180,7 +242,7 @@ export async function runSmoobuSync(): Promise<void> {
 }
 
 export function startSmoobuSync(): void {
-  const cfg = loadConfig();
+  const cfg = loadSmoobuConfig();
   if (!cfg) {
     console.error("[smoobu-sync] disabled (set SMOOBU_API_KEY; GitHub sync credentials are reused)");
     return;
