@@ -53,7 +53,6 @@ async function smoobuGet<T>(cfg: SmoobuConfig, path: string, params: Record<stri
     headers["X-Nonce"] = nonce;
     headers["X-Signature"] = signature;
   } else {
-    // Legacy auth remains usable only during Smoobu's migration window.
     headers["Api-Key"] = cfg.apiKey;
   }
 
@@ -68,7 +67,6 @@ async function allBookings(cfg: SmoobuConfig): Promise<Array<Record<string, unkn
   const rows: Array<Record<string, unknown>> = [];
   for (let page = 1; page <= 500; page++) {
     const res = await smoobuGet<BookingPage>(cfg, "/api/reservations", {
-      from: "2025-01-01",
       page,
       pageSize: 100,
       showCancellation: true,
@@ -81,30 +79,6 @@ async function allBookings(cfg: SmoobuConfig): Promise<Array<Record<string, unkn
   return rows;
 }
 
-function sanitizeBooking(row: Record<string, unknown>) {
-  return {
-    id: row.id,
-    referenceId: row["reference-id"],
-    type: row.type,
-    arrival: row.arrival,
-    departure: row.departure,
-    createdAt: row["created-at"],
-    modifiedAt: row["modified-at"] ?? row.modifiedAt,
-    apartment: row.apartment,
-    channel: row.channel,
-    adults: row.adults,
-    children: row.children,
-    price: row.price,
-    pricePaid: row["price-paid"],
-    prepayment: row.prepayment,
-    prepaymentPaid: row["prepayment-paid"],
-    deposit: row.deposit,
-    depositPaid: row["deposit-paid"],
-    isBlockedBooking: row["is-blocked-booking"],
-    priceElements: row.priceElements,
-  };
-}
-
 function nightsBetween(arrival: unknown, departure: unknown): number {
   if (typeof arrival !== "string" || typeof departure !== "string") return 0;
   const from = Date.parse(`${arrival}T00:00:00Z`);
@@ -113,14 +87,14 @@ function nightsBetween(arrival: unknown, departure: unknown): number {
   return Math.round((to - from) / 86_400_000);
 }
 
-function bookingReports(bookings: ReturnType<typeof sanitizeBooking>[]) {
+function bookingReports(bookings: Array<Record<string, unknown>>) {
   type Bucket = { bookings: number; nights: number; revenue: number };
   const months = new Map<string, Bucket>();
   const apartments = new Map<string, Bucket>();
   const channels = new Map<string, Bucket>();
 
   for (const row of bookings) {
-    if (row.type === "cancellation" || row.isBlockedBooking === true) continue;
+    if (row.type === "cancellation" || row["is-blocked-booking"] === true) continue;
     const month = typeof row.arrival === "string" ? row.arrival.slice(0, 7) : "unknown";
     const nights = nightsBetween(row.arrival, row.departure);
     const revenue = typeof row.price === "number" ? row.price : Number(row.price) || 0;
@@ -172,32 +146,32 @@ export async function runSmoobuSync(): Promise<void> {
   running = true;
   try {
     const syncedAt = new Date().toISOString();
-    const [me, apartmentList, rawBookings] = await Promise.all([
+    const [me, apartmentList, bookings] = await Promise.all([
       smoobuGet<Record<string, unknown>>(cfg, "/api/me"),
       smoobuGet<{ apartments?: Array<Record<string, unknown>> }>(cfg, "/api/apartments"),
       allBookings(cfg),
     ]);
-    const bookings = rawBookings.map(sanitizeBooking);
     const apartments = apartmentList.apartments ?? [];
     const reports = bookingReports(bookings);
 
-    await upsertJson(cfg, "smoobu/account.json", { syncedAt, data: { id: me.id } });
+    // Store complete Smoobu payloads in the private finance repo, including guest/customer fields.
+    await upsertJson(cfg, "smoobu/account.json", { syncedAt, data: me });
     await upsertJson(cfg, "smoobu/apartments.json", { syncedAt, count: apartments.length, data: apartments });
     await upsertJson(cfg, "smoobu/bookings.json", { syncedAt, count: bookings.length, data: bookings });
     await upsertJson(cfg, "reports/smoobu-performance.json", {
       syncedAt,
-      basis: "Smoobu reservation price grouped by arrival month. Source reservations start at 2025-01-01. Cancellations and blocked bookings excluded from performance totals. This is booking revenue, not bank cash received.",
+      basis: "Smoobu reservation price grouped by arrival month. Cancellations and blocked bookings excluded from performance totals. This is booking revenue, not bank cash received.",
       ...reports,
     });
     await upsertJson(cfg, "reports/smoobu-sync-status.json", {
       syncedAt,
       ok: true,
       authMode: cfg.apiSecret ? "hmac" : "legacy",
-      from: "2025-01-01",
+      fullBookingPayloads: true,
       apartmentCount: apartments.length,
       bookingCount: bookings.length,
     });
-    console.error(`[smoobu-sync] OK — ${apartments.length} apartments, ${bookings.length} bookings since 2025-01-01 (${cfg.apiSecret ? "HMAC" : "legacy auth"})`);
+    console.error(`[smoobu-sync] OK — ${apartments.length} apartments, ${bookings.length} full bookings (${cfg.apiSecret ? "HMAC" : "legacy auth"})`);
   } catch (err) {
     console.error(`[smoobu-sync] FAILED: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
