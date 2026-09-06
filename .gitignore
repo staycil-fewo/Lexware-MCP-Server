@@ -8,6 +8,9 @@ dist/
 *.cer
 *.key
 *.p12
+# PriceLabs OAuth bootstrap output contains live tokens/secrets:
+.pricelabs-oauth.json
+.pricelabs-render-env
 .DS_store
 *.tsbuildinfo
 .skybridge/
