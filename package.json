@@ -13,7 +13,8 @@
     "start": "node dist/server.js",
     "typecheck": "tsc -b --force",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "pricelabs:oauth": "node scripts/pricelabs-oauth.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
