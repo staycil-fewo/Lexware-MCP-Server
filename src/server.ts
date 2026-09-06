@@ -5,6 +5,7 @@ import { ConfigError, describeCapabilities, loadConfig } from "./config.js";
 import { startGithubFinanceSync } from "./github-sync.js";
 import { LexwareClient } from "./lexware/client.js";
 import { advertisedScopes, buildOAuthMetadata, createAccessTokenVerifier } from "./oauth.js";
+import "./pricelabs-oauth-rotation.js";
 import { startPriceLabsCommandProcessor } from "./pricelabs-commands.js";
 import { startPriceLabsSync } from "./pricelabs-sync.js";
 import { startSmoobuCommandProcessor } from "./smoobu-commands.js";
