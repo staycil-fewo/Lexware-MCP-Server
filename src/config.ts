@@ -94,6 +94,8 @@ export type AuthConfig =
 
 export interface Config {
   lexwareApiKey: string;
+  /** Optional private machine credential for the StayCil Ops REST adapter. */
+  opsApiSecret?: string;
   /** Base URL without a trailing slash, e.g. `https://api.lexware.io`. */
   lexwareApiBaseUrl: string;
   /** Web-app base for building document deeplinks, e.g. `https://app.lexware.de`. */
@@ -428,6 +430,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   return {
     lexwareApiKey,
+    opsApiSecret: env.OPS_LEXWARE_API_SECRET?.trim() || undefined,
     lexwareApiBaseUrl: normalizeUrl(env.LEXWARE_API_BASE_URL, DEFAULT_BASE_URL, "LEXWARE_API_BASE_URL"),
     lexwareAppBaseUrl: normalizeUrl(
       env.LEXWARE_APP_BASE_URL,

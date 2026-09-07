@@ -14,6 +14,7 @@ import { registerTools } from "./tools/index.js";
 import { deferBodyParsingFor, isMcpPath, isUploadPath } from "./server-body-parsing.js";
 import { registerUploadRoutes } from "./uploads/routes.js";
 import { TicketStore } from "./uploads/tickets.js";
+import { registerOpsRoutes } from "./ops-api.js";
 
 /** Base64 file uploads (upload-file / upload-voucher-file) travel inline in the JSON-RPC body. */
 const JSON_BODY_LIMIT = "12mb";
@@ -66,6 +67,8 @@ const bodyParsingConfigured = deferBodyParsingFor(server.express, (p) => isMcpPa
 server.express.get("/status", (_req: Request, res: Response) => {
   res.json({ status: "ok" });
 });
+
+registerOpsRoutes(server.express, client, config);
 
 // Gate the MCP endpoint according to the configured auth mode.
 if (config.auth.mode === "oauth") {
