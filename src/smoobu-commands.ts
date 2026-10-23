@@ -1,13 +1,15 @@
 import { loadSmoobuConfig, smoobuGet, smoobuPost, type SmoobuConfig } from "./smoobu-sync.js";
+import { checkDirectBooking, createDirectBooking, prepareDirectBooking, type CreateDirectBookingCommand } from "./smoobu-booking-write.js";
 
 type SmoobuCommandAction =
   | "find_bookings"
   | "get_booking"
   | "send_guest_message"
   | "get_guest_messages"
-  | "send_host_message";
+  | "send_host_message"
+  | "create_direct_booking";
 
-interface SmoobuCommand {
+interface SmoobuCommand extends Omit<CreateDirectBookingCommand, "action"> {
   id?: string;
   action?: SmoobuCommandAction;
   reservationId?: number | string;
@@ -102,20 +104,32 @@ async function pathExists(cfg: SmoobuConfig, path: string): Promise<boolean> {
 
 async function upsertJson(cfg: SmoobuConfig, path: string, value: unknown, message: string): Promise<string | undefined> {
   const base = githubContentUrl(cfg, path);
-  let sha: string | undefined;
-  const lookup = await fetch(`${base}?ref=${encodeURIComponent(cfg.branch)}`, { headers: githubHeaders(cfg) });
-  if (lookup.ok) sha = ((await lookup.json()) as { sha?: string }).sha;
-  else if (lookup.status !== 404) throw new Error(`GitHub lookup ${lookup.status}: ${(await lookup.text()).slice(0, 500)}`);
-
   const content = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8").toString("base64");
-  const response = await fetch(base, {
-    method: "PUT",
-    headers: { ...githubHeaders(cfg), "Content-Type": "application/json" },
-    body: JSON.stringify({ message, content, branch: cfg.branch, ...(sha ? { sha } : {}) }),
-  });
-  if (!response.ok) throw new Error(`GitHub write ${response.status}: ${(await response.text()).slice(0, 500)}`);
-  const data = (await response.json()) as { content?: { sha?: string } };
-  return data.content?.sha;
+
+  // Github Contents writes can conflict with the continuous Smoobu sync even on
+  // distinct files. Refresh the SHA and retry 409 rather than losing a booking result.
+  for (let attempt = 0; attempt < 6; attempt++) {
+    let sha: string | undefined;
+    const lookup = await fetch(`${base}?ref=${encodeURIComponent(cfg.branch)}`, { headers: githubHeaders(cfg) });
+    if (lookup.ok) sha = ((await lookup.json()) as { sha?: string }).sha;
+    else if (lookup.status !== 404) throw new Error(`GitHub lookup ${lookup.status}: ${(await lookup.text()).slice(0, 500)}`);
+
+    const response = await fetch(base, {
+      method: "PUT",
+      headers: { ...githubHeaders(cfg), "Content-Type": "application/json" },
+      body: JSON.stringify({ message, content, branch: cfg.branch, ...(sha ? { sha } : {}) }),
+    });
+    if (response.ok) {
+      const data = (await response.json()) as { content?: { sha?: string } };
+      return data.content?.sha;
+    }
+    if (response.status !== 409 && response.status !== 422) {
+      throw new Error(`GitHub write ${response.status}: ${(await response.text()).slice(0, 500)}`);
+    }
+    if (attempt === 5) throw new Error(`GitHub write ${response.status} after 6 retries: ${(await response.text()).slice(0, 500)}`);
+    await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+  }
+  throw new Error("Unreachable GitHub write retry");
 }
 
 async function deleteFile(cfg: SmoobuConfig, path: string, sha: string, message: string): Promise<void> {
@@ -213,6 +227,9 @@ async function executeCommand(cfg: SmoobuConfig, command: SmoobuCommand): Promis
       };
     }
 
+    case "create_direct_booking":
+      return createDirectBooking(cfg, command);
+
     case "get_guest_messages": {
       const reservationId = reservationIdOf(command);
       return {
@@ -264,6 +281,7 @@ export async function processSmoobuCommands(): Promise<void> {
     const items = (await listPending(cfg)).slice(0, 10);
     for (const item of items) {
       let currentSha = item.sha;
+      let resultSaved = false;
       let command: SmoobuCommand | undefined;
       let commandId = item.name.replace(/\.json$/i, "");
       try {
@@ -272,28 +290,44 @@ export async function processSmoobuCommands(): Promise<void> {
         const resultPath = `${RESULTS_DIR}/${commandId}.json`;
 
         if (await pathExists(cfg, resultPath)) {
+          resultSaved = true; // Never overwrite a completed booking result on cleanup failure.
           await deleteFile(cfg, item.path, currentSha, `Remove already processed Smoobu command ${commandId}`);
           continue;
         }
 
         if (command.status === "sending") {
-          const reservationId = reservationIdOf(command);
-          const messages = await allGuestMessages(cfg, reservationId).catch(() => []);
-          await upsertJson(cfg, resultPath, {
-            id: commandId,
-            ok: false,
-            uncertain: true,
-            action: command.action,
-            reservationId,
-            processedAt: new Date().toISOString(),
-            error: "Previous send attempt may already have reached Smoobu. It was not resent automatically to avoid duplicate guest messages.",
-            messages,
-          }, `Record uncertain Smoobu command ${commandId}`);
+          if (command.action === "create_direct_booking") {
+            const found = await checkDirectBooking(cfg, command).catch(() => null);
+            await upsertJson(cfg, resultPath, {
+              id: commandId, ok: false, uncertain: true, action: command.action,
+              possibleReservationId: found?.previous?.id ?? null,
+              processedAt: new Date().toISOString(),
+              error: "Previous booking creation may have reached Smoobu. Never retry automatically; check the Smoobu calendar first.",
+            }, `Record uncertain Smoobu booking ${commandId}`);
+          } else {
+            const reservationId = reservationIdOf(command);
+            const messages = await allGuestMessages(cfg, reservationId).catch(() => []);
+            await upsertJson(cfg, resultPath, {
+              id: commandId,
+              ok: false,
+              uncertain: true,
+              action: command.action,
+              reservationId,
+              processedAt: new Date().toISOString(),
+              error: "Previous send attempt may already have reached Smoobu. It was not resent automatically to avoid duplicate guest messages.",
+              messages,
+            }, `Record uncertain Smoobu command ${commandId}`);
+          }
           await deleteFile(cfg, item.path, currentSha, `Archive uncertain Smoobu command ${commandId}`);
           continue;
         }
 
-        if (command.action === "send_guest_message" || command.action === "send_host_message") {
+        if (command.action === "create_direct_booking" && command.dryRun === false) {
+          prepareDirectBooking(command); // refuse an incomplete price/details before marking write-in-progress
+          if (command.confirmed !== true) throw new Error("Live booking requires confirmed=true and dryRun=false");
+        }
+        if (command.action === "send_guest_message" || command.action === "send_host_message" ||
+            (command.action === "create_direct_booking" && command.dryRun === false)) {
           const marked = { ...command, id: commandId, status: "sending", attemptStartedAt: new Date().toISOString() };
           currentSha = (await upsertJson(cfg, item.path, marked, `Mark Smoobu command ${commandId} as sending`)) ?? currentSha;
           command = marked;
@@ -307,10 +341,15 @@ export async function processSmoobuCommands(): Promise<void> {
           processedAt: new Date().toISOString(),
           output,
         }, `Complete Smoobu command ${commandId}`);
+        resultSaved = true;
         await deleteFile(cfg, item.path, currentSha, `Remove completed Smoobu command ${commandId}`);
         console.error(`[smoobu-command] OK — ${command.action} (${commandId})`);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        if (resultSaved) {
+          console.error(`[smoobu-command] cleanup FAILED after persisted result ${commandId}: ${message}`);
+          continue; // Next poll sees the result and retries only pending-file cleanup.
+        }
         try {
           await upsertJson(cfg, `${RESULTS_DIR}/${commandId}.json`, {
             id: commandId,
@@ -318,6 +357,7 @@ export async function processSmoobuCommands(): Promise<void> {
             action: command?.action,
             processedAt: new Date().toISOString(),
             error: message,
+            ...(command?.action === "create_direct_booking" && command.status === "sending" ? { uncertain: true, retryAutomatically: false } : {}),
           }, `Fail Smoobu command ${commandId}`);
           await deleteFile(cfg, item.path, currentSha, `Remove failed Smoobu command ${commandId}`);
         } catch (archiveErr) {
