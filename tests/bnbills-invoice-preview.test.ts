@@ -74,15 +74,19 @@ describe("bnbills invoice review", () => {
         { foreignId: "161136356", key: "bnbillsCheckinUrl", defaultValue: "https://app.bnbills.de/booking/ours" },
       ],
     });
+    vi.mocked(smoobuGet).mockResolvedValueOnce({ bookings: [{ ...booking, price: 89.6, priceElements: [{ name: "Übernachtung (ohne erneute Reinigung)", type: "basePrice", amount: 85.6, tax: 7 }, { name: "Übernachtungssteuer", type: null, amount: 4, tax: 0 }] }], page_count: 1 });
     const p = await prepareBnBillsInvoiceReview(cfg, 161136356);
     expect(p.linkReady).toBe(true);
+    expect(p.cleaningFee).toBe(0);
+    expect(p.cityTax).toBe(4);
+    expect(p.priceElements).toHaveLength(2);
     expect(p.bnbillsUrl).toBe("https://app.bnbills.de/booking/ours");
-    expect(smoobuGet).toHaveBeenCalledTimes(2);
+    expect(smoobuGet).toHaveBeenCalledTimes(3);
     expect(smoobuGet).toHaveBeenCalledWith(cfg, "/api/custom-placeholders");
   });
 
   it("does not initiate invoice submission through a POST call", async () => {
-    vi.mocked(smoobuGet).mockResolvedValueOnce(booking).mockResolvedValueOnce({ customPlaceholders: [] });
+    vi.mocked(smoobuGet).mockResolvedValueOnce(booking).mockResolvedValueOnce({ customPlaceholders: [] }).mockResolvedValueOnce({ bookings: [{ ...booking, priceElements: [] }] });
     const p = await prepareBnBillsInvoiceReview(cfg, 161136356);
     expect(p.linkReady).toBe(false);
     expect(p.invoiceRequested).toBe(false);
