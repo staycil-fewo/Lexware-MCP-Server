@@ -281,6 +281,7 @@ export async function processSmoobuCommands(): Promise<void> {
     const items = (await listPending(cfg)).slice(0, 10);
     for (const item of items) {
       let currentSha = item.sha;
+      let resultSaved = false;
       let command: SmoobuCommand | undefined;
       let commandId = item.name.replace(/\.json$/i, "");
       try {
@@ -289,6 +290,7 @@ export async function processSmoobuCommands(): Promise<void> {
         const resultPath = `${RESULTS_DIR}/${commandId}.json`;
 
         if (await pathExists(cfg, resultPath)) {
+          resultSaved = true; // Never overwrite a completed booking result on cleanup failure.
           await deleteFile(cfg, item.path, currentSha, `Remove already processed Smoobu command ${commandId}`);
           continue;
         }
@@ -339,10 +341,15 @@ export async function processSmoobuCommands(): Promise<void> {
           processedAt: new Date().toISOString(),
           output,
         }, `Complete Smoobu command ${commandId}`);
+        resultSaved = true;
         await deleteFile(cfg, item.path, currentSha, `Remove completed Smoobu command ${commandId}`);
         console.error(`[smoobu-command] OK — ${command.action} (${commandId})`);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        if (resultSaved) {
+          console.error(`[smoobu-command] cleanup FAILED after persisted result ${commandId}: ${message}`);
+          continue; // Next poll sees the result and retries only pending-file cleanup.
+        }
         try {
           await upsertJson(cfg, `${RESULTS_DIR}/${commandId}.json`, {
             id: commandId,
