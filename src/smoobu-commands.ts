@@ -233,7 +233,7 @@ async function executeCommand(cfg: SmoobuConfig, command: SmoobuCommand): Promis
     case "get_daily_rate": {
       const apartmentId = Number(command.apartmentId);
       const arrival = String(command.from || "");
-      if (!Number.isSafeInteger(apartmentId) || apartmentId <= 0 || !/^\\d{4}-\\d{2}-\\d{2}$/.test(arrival)) {
+      if (!Number.isSafeInteger(apartmentId) || apartmentId <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(arrival)) {
         throw new Error("apartmentId and from=YYYY-MM-DD required");
       }
       return smoobuGet<Record<string, unknown>>(cfg, "/api/rates", {
