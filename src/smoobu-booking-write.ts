@@ -7,7 +7,7 @@ import { smoobuGet, smoobuPost, type SmoobuConfig } from "./smoobu-sync.js";
  */
 export interface CreateDirectBookingCommand {
   id?: string;
-  action?: "create_direct_booking";
+  action?: string; // The processor also carries other action variants.
   apartmentId?: number | string;
   arrivalDate?: string;
   departureDate?: string;
