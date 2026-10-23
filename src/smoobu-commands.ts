@@ -1,5 +1,6 @@
 import { loadSmoobuConfig, smoobuGet, smoobuPost, type SmoobuConfig } from "./smoobu-sync.js";
 import { checkDirectBooking, createDirectBooking, prepareDirectBooking, type CreateDirectBookingCommand } from "./smoobu-booking-write.js";
+import { prepareBnBillsInvoiceReview, type InvoiceFieldOverrides } from "./bnbills-invoice-preview.js";
 
 type SmoobuCommandAction =
   | "find_bookings"
@@ -8,12 +9,14 @@ type SmoobuCommandAction =
   | "get_guest_messages"
   | "send_host_message"
   | "create_direct_booking"
-  | "get_daily_rate";
+  | "get_daily_rate"
+  | "prepare_bnbills_invoice";
 
 interface SmoobuCommand extends Omit<CreateDirectBookingCommand, "action"> {
   id?: string;
   action?: SmoobuCommandAction;
   reservationId?: number | string;
+  invoiceOverrides?: InvoiceFieldOverrides;
   subject?: string;
   messageBody?: string;
   internal?: boolean;
@@ -219,6 +222,11 @@ async function executeCommand(cfg: SmoobuConfig, command: SmoobuCommand): Promis
   switch (command.action) {
     case "find_bookings":
       return findBookings(cfg, command);
+
+    case "prepare_bnbills_invoice": {
+      const reservationId = reservationIdOf(command);
+      return prepareBnBillsInvoiceReview(cfg, reservationId, command.invoiceOverrides ?? {});
+    }
 
     case "get_booking": {
       const reservationId = reservationIdOf(command);
