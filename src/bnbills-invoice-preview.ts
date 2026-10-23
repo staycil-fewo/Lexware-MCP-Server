@@ -32,6 +32,18 @@ interface SmoobuReservation {
   "city-tax"?: number | null;
 }
 
+interface PriceElement {
+  name?: string;
+  type?: string | null;
+  amount?: number;
+  quantity?: number | null;
+  tax?: number | null;
+}
+interface BookingListResponse {
+  page_count?: number;
+  bookings?: Array<SmoobuReservation & { priceElements?: PriceElement[] }>;
+}
+
 interface CustomPlaceholder {
   foreignId?: number | string;
   key?: string;
@@ -72,6 +84,7 @@ export function invoicePreviewFromSmoobu(
   reservation: SmoobuReservation,
   bnbillsUrl: string | null,
   overrides: InvoiceFieldOverrides = {},
+  priceElements: PriceElement[] | null = null,
 ) {
   const note = String(reservation.notice ?? "");
   const company = noteValue(note, "Rechnung an: ");
@@ -95,6 +108,19 @@ export function invoicePreviewFromSmoobu(
   const missingFields = FIELDS.filter((key) => key !== "reference" && !fields[key]);
   if (fields.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fields.email)) missingFields.push("email");
   const guestFormUrl = /^https:\/\/[^\s]+$/i.test(bnbillsUrl || "") ? bnbillsUrl : null;
+  const breakdown = priceElements?.map((element) => ({
+    name: String(element.name ?? ""),
+    type: element.type ?? null,
+    amount: typeof element.amount === "number" ? element.amount : null,
+    quantity: element.quantity ?? null,
+    taxRate: element.tax ?? null,
+  })) ?? null;
+  const cleaningFee = breakdown === null ? null : breakdown
+    .filter((item) => item.type === "cleaningFee")
+    .reduce((total, item) => total + (item.amount ?? 0), 0);
+  const cityTaxFromLines = breakdown?.find((item) =>
+    /uebernachtungssteuer|übernachtungssteuer|city\s*tax|kurtaxe|beherbergungssteuer/i.test(item.name)
+  )?.amount ?? null;
   return {
     reservationId: reservation.id,
     apartment: reservation.apartment?.name ?? null,
@@ -102,7 +128,9 @@ export function invoicePreviewFromSmoobu(
     departure: reservation.departure ?? null,
     guestCount: { adults: reservation.adults ?? null, children: reservation.children ?? null },
     price: typeof reservation.price === "number" ? reservation.price : null,
-    cityTax: reservation["city-tax"] ?? null,
+    cityTax: cityTaxFromLines ?? reservation["city-tax"] ?? null,
+    cleaningFee,
+    priceElements: breakdown,
     currency: "EUR",
     fields,
     missingFields,
@@ -138,5 +166,20 @@ export async function prepareBnBillsInvoiceReview(
   const found = (placeholderResponse.customPlaceholders ?? []).find(
     (p) => String(p.foreignId) === String(reservationId) && p.key === "bnbillsCheckinUrl",
   );
-  return invoicePreviewFromSmoobu(booking, found?.defaultValue ?? null, overrides);
+  let priceElements: PriceElement[] | null = null;
+  if (booking.apartment?.id && booking.arrival && booking.departure) {
+    const rows = await smoobuGet<BookingListResponse>(cfg, "/api/reservations", {
+      from: booking.arrival,
+      to: booking.departure,
+      apartmentId: booking.apartment.id,
+      page: 1,
+      pageSize: 100,
+      includePriceElements: true,
+    });
+    if ((rows.page_count ?? 1) > 1 && !(rows.bookings ?? []).some((row) => row.id === reservationId)) {
+      throw new Error("Cannot verify invoice positions: booking not present on first page");
+    }
+    priceElements = rows.bookings?.find((row) => row.id === reservationId)?.priceElements ?? null;
+  }
+  return invoicePreviewFromSmoobu(booking, found?.defaultValue ?? null, overrides, priceElements);
 }
