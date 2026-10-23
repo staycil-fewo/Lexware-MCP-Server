@@ -7,7 +7,8 @@ type SmoobuCommandAction =
   | "send_guest_message"
   | "get_guest_messages"
   | "send_host_message"
-  | "create_direct_booking";
+  | "create_direct_booking"
+  | "get_daily_rate";
 
 interface SmoobuCommand extends Omit<CreateDirectBookingCommand, "action"> {
   id?: string;
@@ -229,6 +230,17 @@ async function executeCommand(cfg: SmoobuConfig, command: SmoobuCommand): Promis
 
     case "create_direct_booking":
       return createDirectBooking(cfg, command);
+    case "get_daily_rate": {
+      const apartmentId = Number(command.apartmentId);
+      const arrival = String(command.from || "");
+      if (!Number.isSafeInteger(apartmentId) || apartmentId <= 0 || !/^\\d{4}-\\d{2}-\\d{2}$/.test(arrival)) {
+        throw new Error("apartmentId and from=YYYY-MM-DD required");
+      }
+      return smoobuGet<Record<string, unknown>>(cfg, "/api/rates", {
+        "apartments[]": apartmentId, start_date: arrival, end_date: arrival,
+      });
+    }
+
 
     case "get_guest_messages": {
       const reservationId = reservationIdOf(command);
