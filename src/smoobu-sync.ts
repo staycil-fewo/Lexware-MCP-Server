@@ -181,18 +181,41 @@ async function upsertJson(cfg: SmoobuConfig, path: string, value: unknown): Prom
     "X-GitHub-Api-Version": "2022-11-28",
     "User-Agent": "staycil-smoobu-sync",
   };
-  let sha: string | undefined;
-  const lookup = await fetch(`${base}?ref=${encodeURIComponent(cfg.branch)}`, { headers: commonHeaders });
-  if (lookup.ok) sha = ((await lookup.json()) as { sha?: string }).sha;
-  else if (lookup.status !== 404) throw new Error(`GitHub lookup ${lookup.status}: ${(await lookup.text()).slice(0, 500)}`);
-
   const content = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8").toString("base64");
-  const response = await fetch(base, {
-    method: "PUT",
-    headers: { ...commonHeaders, "Content-Type": "application/json" },
-    body: JSON.stringify({ message: `Sync Smoobu data: ${path}`, content, branch: cfg.branch, ...(sha ? { sha } : {}) }),
-  });
-  if (!response.ok) throw new Error(`GitHub ${response.status}: ${(await response.text()).slice(0, 500)}`);
+
+  // The finance sync and the Smoobu command processor write to the same
+  // repository. A concurrent commit can invalidate a previous Contents API
+  // lookup, even when the other writer changed a different file.
+  // Fetch the latest blob SHA before EVERY retry; never retry other errors.
+  const maxAttempts = 8;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    let sha: string | undefined;
+    const lookup = await fetch(`${base}?ref=${encodeURIComponent(cfg.branch)}`, { headers: commonHeaders });
+    if (lookup.ok) sha = ((await lookup.json()) as { sha?: string }).sha;
+    else if (lookup.status !== 404) {
+      throw new Error(`GitHub lookup ${lookup.status}: ${(await lookup.text()).slice(0, 500)}`);
+    }
+
+    const response = await fetch(base, {
+      method: "PUT",
+      headers: { ...commonHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: `Sync Smoobu data: ${path}`,
+        content,
+        branch: cfg.branch,
+        ...(sha ? { sha } : {}),
+      }),
+    });
+    if (response.ok) return;
+
+    if (response.status !== 409 || attempt === maxAttempts - 1) {
+      throw new Error(`GitHub ${response.status}: ${(await response.text()).slice(0, 500)}`);
+    }
+
+    // Bounded exponential backoff with jitter to avoid synchronized writers.
+    const delayMs = Math.min(2000, 150 * 2 ** attempt) + Math.floor(Math.random() * 150);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
 }
 
 let running = false;
